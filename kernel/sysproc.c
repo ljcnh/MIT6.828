@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -90,4 +91,33 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_trace(void)
+{
+  int mask;
+  argint(0, &mask);
+  myproc()->mask = mask;
+  return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  struct sysinfo info;
+
+  availmemory(&(info.freemem));
+  unsetprocnum(&(info.nproc));
+
+  uint64 addr; // user pointer to struct stat
+  // argaddr 第一个参数 指定的是对应的寄存器
+  // 系统调用的返回值放在寄存器0，在/kernel/syscall.c  syscall()
+  argaddr(0, &addr);
+
+  struct proc *p = myproc();
+  if(copyout(p->pagetable, addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+
+  return 0;
 }

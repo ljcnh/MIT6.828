@@ -296,6 +296,8 @@ fork(void)
   }
   np->sz = p->sz;
 
+  np->mask = p->mask;
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -679,5 +681,20 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+// sysinfo 收集进程数目
+void
+unsetprocnum(uint64 *nproc)
+{
+  *nproc = 0;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++)
+  {
+    acquire(&p->lock);
+    if(p->state != UNUSED)
+      (*nproc)++;
+    release(&p->lock);
   }
 }

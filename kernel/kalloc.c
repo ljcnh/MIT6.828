@@ -80,3 +80,18 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+// sysinfo  计算可用内存
+void
+availmemory(uint64 *availmem)
+{
+  *availmem = 0;
+  struct run *r;
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  while(r){
+    (*availmem) += PGSIZE;
+    r = r->next;
+  }
+  release(&kmem.lock);
+}
