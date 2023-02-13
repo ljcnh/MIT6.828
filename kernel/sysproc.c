@@ -75,6 +75,34 @@ int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  uint64 va;
+  int pagenum;
+  uint64 bitsaddr;
+  argaddr(0, &va);
+  argint(1, &pagenum);
+  argaddr(2, &bitsaddr);
+  
+//   if(pagenum > 63){
+//     printf("the arg num [%d] is too large: pagenum<=64 \n" , pagenum);
+//     return -1;
+//   }
+
+  uint64 bitsbuf = 0;
+  struct proc* p = myproc();
+  for(int i = 0 ; i < pagenum; i++){
+    pte_t* pte = walk(p->pagetable, va+i*PGSIZE, 0);
+    if(pte == 0){
+      continue;
+    }
+    if((*pte)&PTE_A){
+        bitsbuf = bitsbuf|(1L<<i);
+    }
+    // x = ((x&(1 << n)) ^ x) ^ (a << n)
+    *pte = (((*pte)&PTE_A) ^ (*pte)) ^ 0;
+  }
+  if(copyout(p->pagetable,bitsaddr,(char *)&bitsbuf,sizeof(bitsbuf))<0){
+    panic("sys_pgaccess copyout faild");
+  }
   return 0;
 }
 #endif

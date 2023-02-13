@@ -1,0 +1,19 @@
+1. 可以加速fork() 在
+
+2. 
+PGSIZE = 4096 
+按照exec顺序来的 顺序一样的
+
+page0 代码段和数据段
+
+  // Allocate two pages at the next page boundary.
+  // Make the first inaccessible as a stack guard.
+  // Use the second as the user stack.
+
+那么page1 应该是 guard page
+page2 也就是第二个段就是用户栈
+page3 到最后就是:  heap, trapfram, trampoline
+
+不能访问，page1 是 guard page
+
+exec places an inaccessible page just below the stack page, so that programs that try to use more than one page will fault
