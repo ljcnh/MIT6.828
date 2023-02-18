@@ -1,0 +1,22 @@
+1. a1到a7    a2保存13
+2. g(x) 被内链到 f(x), f(x) 被进一步内链到 main() 中 (提示很明显了)
+3. 0x64a
+4. 0x038
+   寄存器 ra 的值设置为 pc + 4
+5. He110 World
+   若为大端对齐, i 需要设置为 0x726c6400, 不需要改变 57616的值
+6.  第一个正常输出为3（输出的是a1的值）
+    第二个不确定 但是输出的是寄存器a2的值
+   
+    这里可以使用gdb调试确认，图方便直接在call.c中添加 
+      printf("x=%d y=%d", 3);
+    就行了
+
+    在调试user的时候，要记得
+        set riscv use-compressed-breakpoints yes
+    不让会报错
+
+    当然最方便还是之间使用xv6 已经设置好的文件就可以了   
+        vim ~/.gdbinit
+        添加：   add-auto-load-safe-path /mnt/d/project/6.S081/xv6-labs-2022/.gdbinit
+        /mnt/d/project 换成自己的
