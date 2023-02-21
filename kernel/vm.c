@@ -308,26 +308,28 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
-
+  
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    
+    if((*pte) & PTE_W)
+      *pte = (((*pte) & ~PTE_W) | PTE_PREW | PTE_C);
+    else
+      *pte = ((*pte) | PTE_C);
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    kreferCount((void*)pa, 1);
   }
   return 0;
 
  err:
+  panic("uvmcopy error");
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
@@ -355,6 +357,17 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    
+    int res = isCOW(pagetable,va0);
+    
+    if(res > 0){
+      if(handleCOW(pagetable, va0) != 0)
+        goto err;
+    }
+    else if(res < 0){
+        goto err;
+    }
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -368,6 +381,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     dstva = va0 + PGSIZE;
   }
   return 0;
+err:
+  return -1;
 }
 
 // Copy from user to kernel.
@@ -436,4 +451,64 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+handleCOW(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    panic("handleCOW: pte should exist");
+  if((*pte & PTE_V) == 0)
+    panic("handleCOW: page not present");
+
+  uint flags = PTE_FLAGS(*pte);
+
+  if (flags & (PTE_PREW))
+    flags = ((flags & (~PTE_C) & (~PTE_PREW)) | PTE_W);
+  else
+    flags = (flags & (~PTE_C));
+
+  uint64 pa = PTE2PA(*pte);
+  uint64 va_sta = PGROUNDDOWN(va); 
+
+  uint8 refcnt = getrefcnt(pa);
+  if (refcnt > 1){
+    char *mem;
+    if((mem = kalloc()) == 0)
+      return -1;
+    
+    memmove(mem, (char*)pa, PGSIZE);
+    uvmunmap(pagetable, va_sta, 1, 1);
+
+    if(mappages(pagetable, va_sta, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      return -1;
+    }
+  } 
+  else if(refcnt == 1) {
+    if (*pte & (PTE_PREW))
+        *pte = (((*pte) & (~PTE_C) & (~PTE_PREW)) | PTE_W);
+    else
+        *pte = ((*pte) & (~PTE_C));
+  } else {
+    panic("refer count error");
+  }
+  return 0;
+}
+
+int
+isCOW(pagetable_t pagetable, uint64 va)
+{
+  if(va >= MAXVA){
+    return -1;
+  }
+  pte_t* pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -2;
+  if((*pte & PTE_V) == 0)
+    return -3;
+  if((*pte & PTE_U) == 0)
+    return -4;
+  return ((*pte) & PTE_C);
 }

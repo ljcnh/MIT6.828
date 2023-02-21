@@ -14,6 +14,9 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+#define POS(p)  (((uint64)p - KERNBASE) >> 12)  //   /PGSIZE 等价于 >> 12
+#define CLEN    (PHYSTOP - KERNBASE + PGSIZE - 1)/PGSIZE
+
 struct run {
   struct run *next;
 };
@@ -21,12 +24,17 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  // 所有界面的引用次数
+  struct spinlock reflock;
+  uint8 refercount[CLEN];
 } kmem;
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&kmem.reflock, "kmem refcnt");
+  memset(&kmem.refercount, 1, sizeof(kmem.refercount));
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -51,6 +59,9 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  if(kreferCount((void*)pa, -1) != 0){
+    return;
+  }
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -76,7 +87,56 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
+    kreferCount((void*)r, 1);
+  }
   return (void*)r;
+}
+
+// c > 0 : +1
+// c < 0 : -1
+uint8
+kreferCount(void *pa, int c)
+{
+  int pos = POS(pa);
+  uint refcnt = 0;
+  acquire_reflock();
+  if(c < 0){
+    if(kmem.refercount[pos] == 0){
+      panic("refer count less than 0");
+    }
+    kmem.refercount[pos] -= 1;
+  }else{
+    if(kmem.refercount[pos] == 255){
+      panic("refer count more than 255");
+    }
+    kmem.refercount[pos] += 1;
+  }
+  refcnt = kmem.refercount[pos];
+  release_reflock();
+  return refcnt;
+}
+
+uint8
+getrefcnt(uint64 pa)
+{
+  uint8 refcnt = 0;
+  int pos = POS(pa);
+  acquire_reflock();
+  refcnt = kmem.refercount[pos];
+  release_reflock();
+  return refcnt;
+}
+
+void
+acquire_reflock()
+{
+  acquire(&kmem.reflock);
+}
+
+void
+release_reflock()
+{
+  release(&kmem.reflock);
 }
