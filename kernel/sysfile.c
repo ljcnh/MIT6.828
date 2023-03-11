@@ -16,6 +16,8 @@
 #include "file.h"
 #include "fcntl.h"
 
+#define MAXLINKNUM  10
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -301,6 +303,41 @@ create(char *path, short type, short major, short minor)
   return 0;
 }
 
+struct inode* find_symlink(struct inode* ip) {
+  uint seen[MAXLINKNUM];
+  char target[MAXPATH];
+
+  for(int i = 0; i < MAXLINKNUM; i++){
+    seen[i] = ip->inum;
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0){
+      iunlockput(ip);
+      return 0;
+    }
+    iunlockput(ip);
+    
+    if((ip = namei(target)) == 0){
+        return 0;
+    }
+
+    for(int j = 0; j <= i; j++){
+      if(ip->inum == seen[j]){
+        return 0;
+      }
+    }
+
+    // readi 必须持有对应的 lock
+    // 在进入该函数之前 即 sys_open 中
+    // 已经持有对应ip的lock
+    ilock(ip);
+    if(ip->type != T_SYMLINK){
+        return ip;
+    }
+  }
+
+  iunlockput(ip);
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -339,6 +376,16 @@ sys_open(void)
     iunlockput(ip);
     end_op();
     return -1;
+  }
+
+    
+  // hint 5： When a process specifies O_NOFOLLOW in the flags to open, open should open the symlink (and not follow the symbolic link).
+  // 我的理解是打开当前文件本身 不是打开所指向的那个文件
+  if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0){
+    if((ip = find_symlink(ip)) == 0){
+      end_op();
+      return -1;
+    }
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -501,5 +548,35 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+int
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  uint n;
+  
+  begin_op();
+  if((n = argstr(0, target, MAXPATH)) < 0 || argstr(1, path, MAXPATH) < 0){
+    end_op();
+    return -1;
+  }
+
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  
+  if(writei(ip, 0, (uint64)target, 0, n) != n){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
