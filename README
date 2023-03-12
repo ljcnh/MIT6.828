@@ -1,49 +1,115 @@
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern RISC-V multiprocessor using ANSI C.
+这次还简单。。。。
 
-ACKNOWLEDGMENTS
+1. Uthread: switching between threads 
+   这个 虽然我没有完全搞懂，但是只要看了第7章和对应的代码就比较好做了
 
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)).  See also https://pdos.csail.mit.edu/6.1810/, which provides
-pointers to on-line resources for v6.
+   uthread_switch.S 文件 直接复制 swtch.S 就行了
 
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
+   两者需要保存的寄存器都是 callee-save registers
+```c
+thread_switch:
+	/* YOUR CODE HERE */
+    sd ra, 0(a0)
+    sd sp, 8(a0)
+    sd s0, 16(a0)
+    sd s1, 24(a0)
+    sd s2, 32(a0)
+    sd s3, 40(a0)
+    sd s4, 48(a0)
+    sd s5, 56(a0)
+    sd s6, 64(a0)
+    sd s7, 72(a0)
+    sd s8, 80(a0)
+    sd s9, 88(a0)
+    sd s10, 96(a0)
+    sd s11, 104(a0)
 
-We are also grateful for the bug reports and patches contributed by
-Takahiro Aoyagi, Silas Boyd-Wickizer, Anton Burtsev, carlclone, Ian
-Chen, Dan Cross, Cody Cutler, Mike CAT, Tej Chajed, Asami Doi,
-eyalz800, Nelson Elhage, Saar Ettinger, Alice Ferrazzi, Nathaniel
-Filardo, flespark, Peter Froehlich, Yakir Goaron, Shivam Handa, Matt
-Harvey, Bryan Henry, jaichenhengjie, Jim Huang, Matúš Jókay, John
-Jolly, Alexander Kapshuk, Anders Kaseorg, kehao95, Wolfgang Keller,
-Jungwoo Kim, Jonathan Kimmitt, Eddie Kohler, Vadim Kolontsov, Austin
-Liew, l0stman, Pavan Maddamsetti, Imbar Marinescu, Yandong Mao, Matan
-Shabtay, Hitoshi Mitake, Carmi Merimovich, Mark Morrissey, mtasm, Joel
-Nider, Hayato Ohhashi, OptimisticSide, Harry Porter, Greg Price, Jude
-Rich, segfault, Ayan Shafqat, Eldar Sehayek, Yongming Shen, Fumiya
-Shigemitsu, Cam Tenny, tyfkda, Warren Toomey, Stephen Tu, Rafael Ubal,
-Amane Uehara, Pablo Ventura, Xi Wang, WaheedHafez, Keiichi Watanabe,
-Nicolas Wolovick, wxdao, Grant Wu, Jindong Zhang, Icenowy Zheng,
-ZhUyU1997, and Zou Chang Wei.
+    ld ra, 0(a1)
+    ld sp, 8(a1)
+    ld s0, 16(a1)
+    ld s1, 24(a1)
+    ld s2, 32(a1)
+    ld s3, 40(a1)
+    ld s4, 48(a1)
+    ld s5, 56(a1)
+    ld s6, 64(a1)
+    ld s7, 72(a1)
+    ld s8, 80(a1)
+    ld s9, 88(a1)
+    ld s10, 96(a1)
+    ld s11, 104(a1)
+        
+	ret    /* return to ra */
+```
+
+uthread.c
+
+定义对应的context (照葫芦画瓢)
+```c
+struct thread_context {
+  uint64 ra;
+  uint64 sp;
+  // callee-saved
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+};
+
+struct thread {
+  char       stack[STACK_SIZE]; /* the thread's stack */
+  int        state;             /* FREE, RUNNING, RUNNABLE */
+  // add thread_context
+  struct thread_context context;
+};
+
+void 
+thread_schedule(void)
+{
+    // ...
+  if (current_thread != next_thread) {         /* switch threads?  */
+    next_thread->state = RUNNING;
+    t = current_thread;
+    current_thread = next_thread;
+    /* YOUR CODE HERE
+     * Invoke thread_switch to switch from t to next_thread:
+     * thread_switch(??, ??);
+     */
+    thread_switch((uint64)&t->context, (uint64)&next_thread->context);
+  } // ... 
+}
 
 
-The code in the files that constitute xv6 is
-Copyright 2006-2022 Frans Kaashoek, Robert Morris, and Russ Cox.
+void 
+thread_create(void (*func)())
+{
+  // ...
+  // YOUR CODE HERE
+  t->context.ra = (uint64)(func);
+  t->context.sp = (uint64)&t->stack[STACK_SIZE-1];
+}
+```
 
-ERROR REPORTS
+直接结束
 
-Please send errors and suggestions to Frans Kaashoek and Robert Morris
-(kaashoek,rtm@mit.edu).  The main purpose of xv6 is as a teaching
-operating system for MIT's 6.1810, so we are more interested in
-simplifications and clarifications than new features.
+2. Using threads
+   这个更简单  只要写过多线程
 
-BUILDING AND RUNNING XV6
+   直接申请一个桶大小的数组，存放每个桶的 锁 就行了
 
-You will need a RISC-V "newlib" tool chain from
-https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
-riscv64-softmmu.  Once they are installed, and in your shell
-search path, you can run "make qemu".
+3. Barrier
+   
+   推荐先看下 [这个](https://zhuanlan.zhihu.com/p/508221742)
+
+   它这个 `pthread_cond_wait` 和 `pthread_cond_broadcast` 的使用和其它语言不太一样...
+   我上来直接写 发现不对劲 因为死锁了...  ( c语言 之前都没用过.....
+
+   只要知道这东西怎么用 和 它通常的使用方式 就很简单了
