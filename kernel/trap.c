@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +69,68 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 va = r_stval();
+    int scause = r_scause();
+    struct proc *p = myproc();
+
+    int vma_index = -1;
+
+    if (va >= MAXVA) {
+      p->killed = 1;
+      goto bad;
+    }
+
+    for (int i = 0; i < MAXNVMA; i++){
+      struct vma* vma = &p->vma[i];
+      if(vma->used == 1 && va >= vma->addr && va < vma->addr + PGROUNDUP(vma->length)){
+        vma_index = i;
+        break;
+      }
+    }
+    if(vma_index == -1) {
+      p->killed = 1;
+      goto bad;
+    }
+
+    struct vma *v = &p->vma[vma_index];
+    if(scause == 13 && !(v->prot & PROT_READ)) {
+      p->killed = 1;
+      goto bad;
+    }
+    if(scause == 15 && !(v->prot & PROT_WRITE)) {
+      p->killed = 1;
+      goto bad;
+    }
+
+    va = PGROUNDDOWN(va);
+    void *pa = kalloc();
+    if(pa == 0){
+        panic("mmap_handler: kalloc failed");
+    }
+
+    memset(pa, 0, PGSIZE);
+
+    struct file *f = v->mmapfile;
+    ilock(f->ip);
+    readi(f->ip, 0, (uint64)pa, v->offset + PGROUNDDOWN(va - v->addr), PGSIZE);
+    iunlock(f->ip);
+
+    int perm = PTE_U;
+    if(v->prot & PROT_READ){
+        perm |= PTE_R;
+    }
+    if(v->prot & PROT_WRITE){
+        perm |= PTE_W;
+    }
+    if(v->prot & PROT_EXEC){
+        perm |= PTE_X;
+    }
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) < 0){
+      kfree(pa);
+      p->killed = 1;
+      goto bad;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -72,7 +138,7 @@ usertrap(void)
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
   }
-
+bad:
   if(killed(p))
     exit(-1);
 

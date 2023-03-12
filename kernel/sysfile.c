@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -501,5 +502,111 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64 
+sys_mmap(void) 
+{
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &offset);
+
+  if(addr != 0)
+    panic("sys_mmap: addr not set 0");
+  if(offset != 0)
+    panic("sys_mmap: offset not set 0");
+
+  struct file *f = p->ofile[fd];
+
+  if((!(f->writable)) && (flags & MAP_SHARED) && (prot & PROT_WRITE)){
+    return -1;
+  }
+  if((!(f->readable)) && (prot & PROT_READ)){
+    return -1;
+  }
+
+  struct vma *vma = 0;
+  uint64 min_mmap_addr = TRAPFRAME;
+  for (int i = 0; i < MAXNVMA; i++){
+    struct vma *v = &p->vma[i];
+    if(!v->used){
+      if(!vma){
+        vma = v;
+        v->used = 1;
+      }
+    } else if(v->addr < min_mmap_addr){
+      min_mmap_addr = PGROUNDDOWN(v->addr);
+    }
+  }
+  if(!vma){
+    return -1;
+  }
+
+  vma->addr = min_mmap_addr - PGROUNDUP(length);;
+  vma->length = length;
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->offset = offset;
+  vma->mmapfile = f;
+  filedup(f);     // increase the file's reference count
+
+  return vma->addr;
+}
+
+// lab10
+uint64 sys_munmap(void) 
+{
+  uint64 addr;
+  int length;
+  int vma_index = -1;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  for (int i = 0; i < MAXNVMA; i++){
+    struct vma* vma = &p->vma[i];
+    if(vma->used == 1 && addr >= vma->addr && addr < vma->addr + vma->length){
+      vma_index = i;
+      break;
+    }
+  }
+  if(vma_index == -1){
+    return -1;
+  }
+  struct vma *v = &p->vma[vma_index];
+
+  if(addr != v->addr && addr + length != v->addr + v->length){
+    return -1;
+  }
+
+  if(addr == v->addr){
+    v->addr += length;
+    v->length -= length;
+  } else if(addr + length == v->addr + v->length){
+    v->length -= length;
+  }
+
+  // Write back to file if configured
+  if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
+    filewrite(v->mmapfile, addr, length);
+  }
+  // Remove mappings
+  uvmunmap(p->pagetable, addr, PGROUNDUP(length) / PGSIZE, 1);
+
+  // Close the file if the all mappings are removed in the VMA
+  if(v->length == 0){
+    fileclose(v->mmapfile);
+    v->used = 0;
+  }
+
   return 0;
 }
