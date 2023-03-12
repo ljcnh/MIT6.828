@@ -1,49 +1,322 @@
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern RISC-V multiprocessor using ANSI C.
+1. Memory allocator 
+   
+   比较简单 实验中已经说明了基本思路：
 
-ACKNOWLEDGMENTS
-
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)).  See also https://pdos.csail.mit.edu/6.1810/, which provides
-pointers to on-line resources for v6.
-
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
-
-We are also grateful for the bug reports and patches contributed by
-Takahiro Aoyagi, Silas Boyd-Wickizer, Anton Burtsev, carlclone, Ian
-Chen, Dan Cross, Cody Cutler, Mike CAT, Tej Chajed, Asami Doi,
-eyalz800, Nelson Elhage, Saar Ettinger, Alice Ferrazzi, Nathaniel
-Filardo, flespark, Peter Froehlich, Yakir Goaron, Shivam Handa, Matt
-Harvey, Bryan Henry, jaichenhengjie, Jim Huang, Matúš Jókay, John
-Jolly, Alexander Kapshuk, Anders Kaseorg, kehao95, Wolfgang Keller,
-Jungwoo Kim, Jonathan Kimmitt, Eddie Kohler, Vadim Kolontsov, Austin
-Liew, l0stman, Pavan Maddamsetti, Imbar Marinescu, Yandong Mao, Matan
-Shabtay, Hitoshi Mitake, Carmi Merimovich, Mark Morrissey, mtasm, Joel
-Nider, Hayato Ohhashi, OptimisticSide, Harry Porter, Greg Price, Jude
-Rich, segfault, Ayan Shafqat, Eldar Sehayek, Yongming Shen, Fumiya
-Shigemitsu, Cam Tenny, tyfkda, Warren Toomey, Stephen Tu, Rafael Ubal,
-Amane Uehara, Pablo Ventura, Xi Wang, WaheedHafez, Keiichi Watanabe,
-Nicolas Wolovick, wxdao, Grant Wu, Jindong Zhang, Icenowy Zheng,
-ZhUyU1997, and Zou Chang Wei.
+    ``` 
+    The basic idea is to maintain a free list per CPU, each list 
+    with its own lock. Allocations and frees on different CPUs can 
+    run in parallel, because each CPU will operate on a different 
+    list. The main challenge will be to deal with the case in 
+    which one CPU's free list is empty, but another CPU's list has
+     free memory; in that case, the one CPU must "steal" part of 
+    the other CPU's free list. Stealing may introduce lock 
+    contention, but that will hopefully be infrequent. 
+    ```
 
 
-The code in the files that constitute xv6 is
-Copyright 2006-2022 Frans Kaashoek, Robert Morris, and Russ Cox.
+    提示中也说了 会用到NCPU(cpu的个数)
 
-ERROR REPORTS
+```c
+// 首先修改 kmem 定义
+struct {
+  struct spinlock lock;
+  struct run *freelist;
+} kmem[NCPU];
 
-Please send errors and suggestions to Frans Kaashoek and Robert Morris
-(kaashoek,rtm@mit.edu).  The main purpose of xv6 is as a teaching
-operating system for MIT's 6.1810, so we are more interested in
-simplifications and clarifications than new features.
+// 当然对应的初始化也要修改
+void
+kinit()
+{
+  char name[7];
+  
+  for (int i = 0; i < NCPU; i++) {
+    // snprintf 提示中说了 不过name一样也没啥事
+    snprintf(name, sizeof(name), "kmem_%d", i);
+    initlock(&kmem[i].lock, name);
+  }
+  // Let freerange give all free memory to the CPU running freerange.
+  // 意思就是 不管它
+  freerange(end, (void*)PHYSTOP);
+}
 
-BUILDING AND RUNNING XV6
 
-You will need a RISC-V "newlib" tool chain from
-https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
-riscv64-softmmu.  Once they are installed, and in your shell
-search path, you can run "make qemu".
+void
+kfree(void *pa)
+{
+  struct run *r;
+
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("kfree");
+
+  // Fill with junk to catch dangling refs.
+  memset(pa, 1, PGSIZE);
+
+  r = (struct run*)pa;
+  
+  // 获取cpuid 提示中说到要关闭中断才可
+  push_off();
+  int cid = cpuid();
+  pop_off();
+
+  // kmem 全都改为  kmem[cid]  就可以了
+  acquire(&kmem[cid].lock);
+  r->next = kmem[cid].freelist;
+  kmem[cid].freelist = r;
+  release(&kmem[cid].lock);
+}
+
+void *
+kalloc(void)
+{
+  struct run *r;
+
+  // 获取cpu id
+  push_off();
+  int cid = cpuid();
+  pop_off();
+
+  acquire(&kmem[cid].lock);
+  r = kmem[cid].freelist;
+  if(r) {
+    kmem[cid].freelist = r->next;
+  }
+  release(&kmem[cid].lock);
+  // 以上和之前差不多
+  
+  // 需要在其他cpu的freelist中申请 直接遍历
+  if (!r) {
+    for(int id = 0; id < NCPU && !r; id++) {
+      if (cid == id) {
+        continue;
+      }
+      acquire(&kmem[id].lock);
+      r = kmem[id].freelist;
+      if(r) {
+        kmem[id].freelist = r->next;
+      }
+      release(&kmem[id].lock);
+    }
+  }
+
+  if(r)
+    memset((char*)r, 5, PGSIZE); // fill with junk
+  return (void*)r;
+}
+```
+2. Buffer cache  
+
+这个有点难......  参考了网上的思路
+
+主要思路本上一个差不多， 
+
+```c
+struct buf {
+  int valid;   // has data been read from disk?
+  int disk;    // does disk "own" buf?
+  uint dev;
+  uint blockno;
+  struct sleeplock lock;
+  uint refcnt;
+  // prev 删掉就行了
+  // 改成map了 ，使用链表法解决冲突  prev也没啥必要了
+  // struct buf *prev; // LRU cache list
+  struct buf *next;
+  uchar data[BSIZE];
+  // 时间戳
+  uint timestamp;
+};
+```
+
+```c
+#define NBUCKET 13
+#define HASH(blockno) (blockno % NBUCKET)
+// trap.c 
+extern uint ticks;
+
+struct {
+  struct spinlock lock;
+  struct buf buf[NBUF];
+  // ...
+  // 未被使用的buf的下标
+  uint unused;
+  struct buf buckets[NBUCKET];
+  struct spinlock bucketlocks[NBUCKET];
+} bcache;
+
+// 初始化函数也要修改
+// 在原初始化函数  (Create linked list of buffers)  的目的是初始化buf
+// 保证在 bget 中能够使用已存在的buf
+// 现在我们将使用 buckets 来维护buf的使用
+// 但是 在一开始 buckets 没有任何的buf
+// 有两个思路：
+//   1. 将所有的buf保存在 buckets[0] 中
+//   2. 在 bget 中分配 （我用的这种  所以需要一个未使用的 buf的下标）
+void
+binit(void)
+{
+  struct buf *b;
+  
+  bcache.unused = 0;
+  initlock(&bcache.lock, "bcache");
+
+  char name[9];
+  for(int i = 0; i < NBUCKET; i++) {
+    snprintf(name, sizeof(name), "bcache_%d", i);
+    initlock(&bcache.lock, name);
+  }
+
+  // Create linked list of buffers
+  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
+    initsleeplock(&b->lock, "buffer");
+  }
+}
+
+
+void
+brelse(struct buf *b)
+{
+  if(!holdingsleep(&b->lock))
+    panic("brelse");
+
+  releasesleep(&b->lock);
+  int bucketid = HASH(b->blockno);
+  // 申请对应的 buckets 的锁
+  acquire(&bcache.bucketlocks[bucketid]);
+  b->refcnt--;
+  if (b->refcnt == 0) {
+    // 更新对应的时间戳
+    b->timestamp = ticks;
+  }
+  release(&bcache.bucketlocks[bucketid]);
+}
+
+// bpin 和 bunpin 修改一下下标就行
+void
+bpin(struct buf *b) {
+  int bucketid = HASH(b->blockno);
+  acquire(&bcache.bucketlocks[bucketid]);
+  b->refcnt++;
+  release(&bcache.bucketlocks[bucketid]);
+}
+
+void
+bunpin(struct buf *b) {
+  int bucketid = HASH(b->blockno);
+  acquire(&bcache.bucketlocks[bucketid]);
+  b->refcnt--;
+  release(&bcache.bucketlocks[bucketid]);
+}
+
+
+// 这个很麻烦
+// 思路：
+// 1. 开始于之前相同 申请对应bucketlocks的锁
+//    遍历 buckets 查看是不是已经有对应的buf了 
+//    有则直接返回  没有就进入 2
+// 2. 获取全局锁 bcache.lock
+//    因为在获取 bcache.lock 之前有释放锁的操作 并在这段期间内不持有其他锁
+//    所以有可能被其他的线程修改了 需要重新检测对应的 buckets
+// 3. 若还是没有 那就需要检测是不是所有的buf都已经分配出去了
+//    没有都分配出去那就分配
+// 4. 这个时候就需要遍历其他的 buckets 看看有没有 cnt=0 的
+//    有的话就将这个作为结果返回 当还要判断是不是同一 buckets，不是的话还需要移动
+// 一定要注意锁的申请和释放！！！
+static struct buf*
+bget(uint dev, uint blockno)
+{
+  struct buf *b;
+  int bucketid = HASH(blockno);
+
+  struct buf *pre, *minb = 0, *minpre;
+  uint mintimestamp;
+  
+  acquire(&bcache.bucketlocks[bucketid]);
+  // Is the block already cached?
+  for(b = &bcache.buckets[bucketid]; b; b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.bucketlocks[bucketid]);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+  release(&bcache.bucketlocks[bucketid]);
+
+
+  // Not cached.
+  // Recycle the least recently used (LRU) unused buffer.
+  acquire(&bcache.lock);
+  
+  // 上方有释放锁的过程 在这个过程中可能会有其他的线程 做出改变
+  acquire(&bcache.bucketlocks[bucketid]);
+  for(pre = &bcache.buckets[bucketid],b = pre->next; b; pre = b, b = b->next){
+    if(b->dev == dev && b->blockno == blockno){
+      b->refcnt++;
+      release(&bcache.bucketlocks[bucketid]);
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+
+  if(bcache.unused < NBUF) {
+    b = &bcache.buf[bcache.unused++];
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+    b->next = bcache.buckets[bucketid].next;
+    bcache.buckets[bucketid].next = b;
+
+    release(&bcache.bucketlocks[bucketid]);
+    release(&bcache.lock);
+    acquiresleep(&b->lock);
+    return b;
+  }
+  release(&bcache.bucketlocks[bucketid]);
+
+  for(int i = 0; i < NBUCKET; i++) {
+    mintimestamp = -1;
+    acquire(&bcache.bucketlocks[i]);
+    for(pre = &bcache.buckets[i],b = pre->next; b; pre = b, b = b->next){
+      if(b->refcnt == 0 && b->timestamp < mintimestamp){
+        minb = b;
+        minpre = pre;
+        mintimestamp = b->timestamp;
+      }
+    }
+    
+    if(minb){
+      minb->dev = dev;
+      minb->blockno = blockno;
+      minb->valid = 0;
+      minb->refcnt = 1;
+
+      if(idx != bucketid) {
+        minpre->next = minb->next;
+        release(&bcache.bucketlocks[idx]);
+
+        acquire(&bcache.bucketlocks[bucketid]);
+        minb->next = bcache.buckets[bucketid].next;
+        bcache.buckets[bucketid].next = minb;
+        release(&bcache.bucketlocks[bucketid]);
+      } else {
+        release(&bcache.bucketlocks[idx]);
+      }
+
+      release(&bcache.bucketlocks[idx]);
+      release(&bcache.lock);
+      acquiresleep(&minb->lock);
+      return minb;
+    }
+
+    release(&bcache.bucketlocks[i]);
+  }
+  release(&bcache.lock);
+
+  panic("bget: no buffers");
+}
+```
+
+
+就这样吧  懒得优化了 
